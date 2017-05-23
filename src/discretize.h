@@ -4,25 +4,26 @@
 #include <vector>
 #include <map>
 #include <moab/Types.hpp>
+#include "dagmc_bridge.h"
 
 using moab::EntityHandle;
 
 namespace pyne{
 
-/*
 struct disc_result {
-  int id;
+  int idx;
   int cell;
   double vol_frac;
   double rel_error;
 };
-*/
 
 // The results about which we care are stored in these structs.
+/*
 struct sums {
   double sum;
   double sqr_sum;
 };
+*/
 
 //Keep together those things which need to be passed to many different functions
 struct mesh_row {
@@ -32,8 +33,8 @@ struct mesh_row {
   // a perfect square.
   bool grid;
   //WATCH THIS
-  // The results of the ray fires.
-  struct sums result;
+  // The totals of the ray fires.
+  std::vector<std::map<EntityHandle, double*> > totals;
   // The coordinates of the start of each ray fired.
   double start_point_d1, start_point_d2;
   // The different divisions that define the current row
@@ -61,7 +62,7 @@ struct mesh_row {
  *    A vector of the results for each row, consisting of the sum of the values
  * given by the fired rays as well as the sum of the values squared.
 */
-std::vector<struct sums> discretize_geom(std::vector<std::vector<double> > mesh,
+std::vector<struct disc_result> discretize_geom(std::vector<std::vector<double> > mesh,
     std::map<EntityHandle, int> vol_handles_ids,
     int num_rays,
     bool grid);
@@ -98,7 +99,8 @@ void fireRays(mesh_row &row, std::map<EntityHandle, int> vol_handles_ids);
 */
 void startPoints(mesh_row &row, int iter);
 
-int find_volume(mesh_row &row, std::map<EntityHandle, int> vol_handles_ids);
+EntityHandle find_volume(std::map<EntityHandle, int> vol_handles_ids, vec3 pt,
+                         vec3 dir);
 } //namespace pyne
 
 #endif // PYNE_DISCRETIZE_GEOM_H
