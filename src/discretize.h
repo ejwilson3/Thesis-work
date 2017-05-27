@@ -10,20 +10,6 @@ using moab::EntityHandle;
 
 namespace pyne{
 
-struct disc_result {
-  int idx;
-  int cell;
-  double vol_frac;
-  double rel_error;
-};
-
-// The results about which we care are stored in these structs.
-/*
-struct sums {
-  double sum;
-  double sqr_sum;
-};
-*/
 
 //Keep together those things which need to be passed to many different functions
 struct mesh_row {
@@ -34,7 +20,7 @@ struct mesh_row {
   bool grid;
   //WATCH THIS
   // The totals of the ray fires.
-  std::vector<std::map<EntityHandle, double*> > totals;
+  std::vector<std::map<EntityHandle, std::vector<double> > > totals;
   // The coordinates of the start of each ray fired.
   double start_point_d1, start_point_d2;
   // The different divisions that define the current row
@@ -62,14 +48,14 @@ struct mesh_row {
  *    A vector of the results for each row, consisting of the sum of the values
  * given by the fired rays as well as the sum of the values squared.
 */
-std::vector<struct disc_result> discretize_geom(std::vector<std::vector<double> > mesh,
+std::vector<std::vector<double> > discretize_geom(std::vector<std::vector<double> > mesh,
     std::map<EntityHandle, int> vol_handles_ids,
     int num_rays,
     bool grid);
 
 /*
  * This function fires rays down a single row of the mesh.
- * 
+ *
  * Parameters:
  *    row:  The various variables which define the current row, as well as how
  * the rays are to be fired.
@@ -80,7 +66,7 @@ std::vector<struct disc_result> discretize_geom(std::vector<std::vector<double> 
  *    row:  The "result" member of row will have been changed to reflect the
  * information obtained by firing the rays.
 */
-void fireRays(mesh_row &row, std::map<EntityHandle, int> vol_handles_ids);
+std::vector<std::map<EntityHandle, std::vector<double> > > fireRays(mesh_row &row, std::map<EntityHandle, int> vol_handles_ids);
 
 /*
  * This function determines the starting coordinates for the next ray. It is
