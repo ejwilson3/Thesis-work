@@ -18,9 +18,6 @@ struct mesh_row {
   // True if evenly spaced ray fires, false if random. If true, num_rays must be
   // a perfect square.
   bool grid;
-  //WATCH THIS
-  // The totals of the ray fires.
-  std::vector<std::map<EntityHandle, std::vector<double> > > totals;
   // The coordinates of the start of each ray fired.
   double start_point_d1, start_point_d2;
   // The different divisions that define the current row
@@ -48,7 +45,8 @@ struct mesh_row {
  *    A vector of the results for each row, consisting of the sum of the values
  * given by the fired rays as well as the sum of the values squared.
 */
-std::vector<std::vector<double> > discretize_geom(std::vector<std::vector<double> > mesh,
+std::vector<std::vector<double> > discretize_geom(
+    std::vector<std::vector<double> > mesh,
     std::map<EntityHandle, int> vol_handles_ids,
     int num_rays,
     bool grid);
@@ -66,7 +64,9 @@ std::vector<std::vector<double> > discretize_geom(std::vector<std::vector<double
  *    row:  The "result" member of row will have been changed to reflect the
  * information obtained by firing the rays.
 */
-std::vector<std::map<EntityHandle, std::vector<double> > > fireRays(mesh_row &row, std::map<EntityHandle, int> vol_handles_ids);
+std::vector<std::map<int, std::vector<double> > > fireRays(
+    mesh_row &row,
+    std::map<EntityHandle, int> vol_handles_ids);
 
 /*
  * This function determines the starting coordinates for the next ray. It is
@@ -85,8 +85,38 @@ std::vector<std::map<EntityHandle, std::vector<double> > > fireRays(mesh_row &ro
 */
 void startPoints(mesh_row &row, int iter);
 
+/*
+ * This function determines the current volume in which a point is.
+ * Called from within fireRays.
+ *
+ * Parameters:
+ *    vol_handles_ids: The map of entity handles and ids cooresponding to the
+ * volumes.
+ *    pt:              The point for which the volume is being found.
+ *    dir:             The direction in which we're firing rays.
+ *
+ * Returns:
+ *    eh:              The entity handle for the desired volume.
+*/
 EntityHandle find_volume(std::map<EntityHandle, int> vol_handles_ids, vec3 pt,
                          vec3 dir);
+
+/*
+ * This function determines the ids of the volume elements in the current row.
+ *
+ * Parameters:
+ *    sizes:  The number of volume elements in each direction.
+ *    d1:     The current volume element count in direction d1.
+ *    d2:     The current volume element count in direction d2.
+ *    d3:     This value, between 0 and 2, determines in which direction the
+ * ray is being fired.
+ *
+ * Returns:
+ *    A vector with the ids of each volume element in the current row.
+*/
+std::vector<int> get_idx(int sizes[], int d1,
+                         int d2, int d3);
+
 } //namespace pyne
 
 #endif // PYNE_DISCRETIZE_GEOM_H
