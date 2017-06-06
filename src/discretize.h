@@ -1,15 +1,45 @@
-#ifndef PYNE_DISCRETIZE_GEOM_H
-#define PYNE_DISCRETIZE_GEOM_H
+#ifndef DISCRETIZE_GEOM_H
+#define DISCRETIZE_GEOM_H
 
 #include <vector>
 #include <map>
+#include <DagMC.hpp>
+#include <moab/Interface.hpp>
+// #include <moab/GeomQueryTool.hpp>
+#include <moab/GeomTopoTool.hpp>
 #include <moab/Types.hpp>
-#include "dagmc_bridge.h"
 
+using moab::ErrorCode;
 using moab::EntityHandle;
+using moab::DagMC;
 
-namespace pyne{
+// Global variables
+// moab::Interface* MBI;
+// moab::GeomTopoTool* GTT;
+// moab::GeomQueryTool* GQt;
+// The maxiumum volume fraction to be considered valid
 
+// From dagmc_bridge.h in Pyne
+class ray_buffers {
+
+public:
+  DagMC::RayHistory history;
+  std::vector<EntityHandle> surfs;
+  std::vector<double> dists;
+  std::vector<EntityHandle> vols;
+
+};
+
+typedef double vec3[3];
+
+ErrorCode dag_pt_in_vol(EntityHandle vol, vec3 pt, int* result, vec3 dir,
+                         const void* history);
+
+ErrorCode dag_ray_follow(EntityHandle firstvol, vec3 ray_start, vec3 ray_dir,
+                          double distance_limit, int* num_intersections,
+                          EntityHandle** surfs, double** distances,
+                          EntityHandle** volumes, ray_buffers* data_buffers);
+// End of functions from dagmc_bridge
 
 //Keep together those things which need to be passed to many different functions
 struct mesh_row {
@@ -35,11 +65,11 @@ struct mesh_row {
  * Parameters:
  *    mesh:             a vector of three vectors, each containing the
  * coordinates of the divisions in one direction of the actual mesh.
- *    vol_handles_ids:  a map of the EntityHandles and ids of the various
- * volumes of the geometry..
- *    num_rays: The number of rays to be fired.
- *    grid:     Whether the rays are to be fired evenly spaced apart or at
- * random. True if evenly spaced.
+ *    vol_handles:      a map of the EntityHandles of the various volumes of the
+ * geometry.
+ *    num_rays:         The number of rays to be fired.
+ *    grid:             Whether the rays are to be fired evenly spaced apart or
+ * at random. True if evenly spaced.
  *
  * Returns:
  *    A vector of the results for each row, consisting of the sum of the values
@@ -47,7 +77,8 @@ struct mesh_row {
 */
 std::vector<std::vector<double> > discretize_geom(
     std::vector<std::vector<double> > mesh,
-    std::map<EntityHandle, int> vol_handles_ids,
+    // std::vector<EntityHandle> vol_handles,
+    const char* filename,
     int num_rays,
     bool grid);
 
@@ -55,10 +86,10 @@ std::vector<std::vector<double> > discretize_geom(
  * This function fires rays down a single row of the mesh.
  *
  * Parameters:
- *    row:  The various variables which define the current row, as well as how
- * the rays are to be fired.
- *    vol_handles_ids:  a map of the EntityHandles and ids of the various
- * volumes of the geometry..
+ *    row:          The various variables which define the current row, as well
+ * as how the rays are to be fired.
+ *    vol_handles:  a list of the EntityHandles of the various volumes of the
+ * geometry.
  *
  * Output:
  *    row:  The "result" member of row will have been changed to reflect the
@@ -66,7 +97,7 @@ std::vector<std::vector<double> > discretize_geom(
 */
 std::vector<std::map<int, std::vector<double> > > fireRays(
     mesh_row &row,
-    std::map<EntityHandle, int> vol_handles_ids);
+    std::vector<EntityHandle> vol_handles_ids);
 
 /*
  * This function determines the starting coordinates for the next ray. It is
@@ -90,16 +121,14 @@ void startPoints(mesh_row &row, int iter);
  * Called from within fireRays.
  *
  * Parameters:
- *    vol_handles_ids: The map of entity handles and ids cooresponding to the
- * volumes.
+ *    vol_handles: The list of entity handles cooresponding to the volumes.
  *    pt:              The point for which the volume is being found.
  *    dir:             The direction in which we're firing rays.
  *
  * Returns:
  *    eh:              The entity handle for the desired volume.
 */
-EntityHandle find_volume(std::map<EntityHandle, int> vol_handles_ids, vec3 pt,
-                         vec3 dir);
+EntityHandle find_volume(std::vector<EntityHandle> vol_handles_ids, vec3 pt, vec3 dir);
 
 /*
  * This function determines the ids of the volume elements in the current row.
@@ -117,6 +146,7 @@ EntityHandle find_volume(std::map<EntityHandle, int> vol_handles_ids, vec3 pt,
 std::vector<int> get_idx(int sizes[], int d1,
                          int d2, int d3);
 
-} //namespace pyne
+ErrorCode load_geometry(const char* filename,
+                        std::vector<EntityHandle>* vol_handles);
 
-#endif // PYNE_DISCRETIZE_GEOM_H
+#endif // DISCRETIZE_GEOM_H

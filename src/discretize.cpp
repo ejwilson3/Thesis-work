@@ -3,23 +3,29 @@
 #include <stdlib.h>
 #include <math.h>
 #include <iostream>
+#include <moab/CartVect.hpp>
 
-// The maxiumum volume fraction to be considered valid
+using moab::CartVect;
+
 float VOL_FRAC_TOLERANCE = 1e-10;
-
-namespace pyne{
 
 std::vector<std::vector<double> > discretize_geom(
     std::vector<std::vector<double> > mesh,
-    std::map<EntityHandle, int> vol_handles_ids,
-    int num_rays,
+    // std::vector<EntityHandle> vol_handles,
+    const char* filename,
+    int num_rays = 10,
     bool grid = false) {
 
   // This will store the information of the individual row and how the rays
   // are to be fired.
+  std::vector<EntityHandle> vol_handles;
+  load_geometry(filename, &vol_handles);
   struct mesh_row row;
   row.num_rays = num_rays;
   row.grid = grid;
+  if (grid && (pow(sqrt(num_rays), 2) != num_rays))
+    throw std::runtime_error("For rays fired in a grid, num_rays must be "
+                             "a perfect square.");
 
   // Initialize this here to avoid creating it multiple times during loops.
   std::vector<double> zeros(2,0.0);
@@ -52,7 +58,7 @@ std::vector<std::vector<double> > discretize_geom(
 
         // The rays are fired and totals collected here.
         std::vector<std::map<int, std::vector<double> > > ray_totals =
-            fireRays(row, vol_handles_ids);
+            fireRays(row, vol_handles);
 
         // Combine the totals collected from each direction by volume element.
         for (int k = 0; k < ray_totals.size(); k++) {
@@ -75,7 +81,6 @@ std::vector<std::vector<double> > discretize_geom(
     }
   }
 
-
   // Evaluate the results and prepare them for return.
   int total_rays = num_rays*3;
   std::vector<double> ray_results(4,0.0);
@@ -95,7 +100,7 @@ std::vector<std::vector<double> > discretize_geom(
 
 std::vector<std::map<int, std::vector<double> > > fireRays(
     mesh_row &row,
-    std::map<EntityHandle, int> vol_handles_ids) {
+    std::vector<EntityHandle> vol_handles) {
 
   std::vector<std::map<int, std::vector<double> > > row_totals;
   std::vector<double> width;
@@ -114,9 +119,9 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
   int num_intersections;
   EntityHandle *surfs, *volumes;
   double *distances;
-  void* buf;
 
   for (int i = 0; i < row.num_rays; i++) {
+    ray_buffers* buf = new ray_buffers;
     startPoints(row, i);
     pt[(row.d3+1)%3] = row.start_point_d1;
     pt[(row.d3+2)%3] = row.start_point_d2;
@@ -125,8 +130,7 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
     if (i != 0)
       dag_pt_in_vol(eh, pt, &result, dir, NULL);
     if (!result)
-      eh = find_volume(vol_handles_ids, pt, dir);
-
+      eh = find_volume(vol_handles, pt, dir);
 
     dag_ray_follow(eh, pt, dir, 0.0, &num_intersections,
                    &surfs, &distances, &volumes, buf);
@@ -139,7 +143,6 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
     int intersection = 0;
     bool complete = false;
     double curr_width = width[count];
-    int vol_id = vol_handles_ids[eh];
     // Loops over the ray's intersections with the different volumes.
     while(!complete) {
       // while the distance to the next intersection is greater than the current
@@ -148,13 +151,13 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
       while (distances[intersection] >= curr_width) {
         value = curr_width/width[count];
         std::map<int, std::vector<double> >::iterator it =
-            row_totals[count].find(vol_id);
+            row_totals[count].find(eh);
         // If the current cell isn't in the totals yet, add it.
         if (it == row_totals[count].end()){
-          row_totals[count].insert(it, std::make_pair(vol_id, zeros));
+          row_totals[count].insert(it, std::make_pair(eh, zeros));
         }
-        row_totals[count][vol_id][0] += value;
-        row_totals[count][vol_id][1] += value*value;
+        row_totals[count][eh][0] += value;
+        row_totals[count][eh][1] += value*value;
         distances[intersection] -= curr_width;
 
         // If there are more volume elements, move to the next one.
@@ -176,20 +179,20 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
           !complete) {
         value = distances[intersection]/curr_width;
         std::map<int, std::vector<double> >::iterator it =
-            row_totals[count].find(vol_id);
+            row_totals[count].find(eh);
 
         // If the current cell isn't in the totals yet, add it.
         if (it == row_totals[count].end()){
-          row_totals[count].insert(it, std::make_pair(vol_id, zeros));
+          row_totals[count].insert(it, std::make_pair(eh, zeros));
         }
-        row_totals[count][vol_id][0] += value;
-        row_totals[count][vol_id][1] += value*value;
+        row_totals[count][eh][0] += value;
+        row_totals[count][eh][1] += value*value;
         curr_width -= distances[intersection];
       }
-      vol_id = vol_handles_ids[volumes[intersection]];
+      eh = volumes[intersection];
       intersection++;
     }
-    dag_dealloc_ray_buffer(buf);
+    delete buf;
   }
   return row_totals;
 }
@@ -214,17 +217,16 @@ void startPoints(mesh_row &row, int iter) {
   }
 }
 
-EntityHandle find_volume(std::map<EntityHandle, int> vol_handles_ids,
+EntityHandle find_volume(std::vector<EntityHandle> vol_handles,
                          vec3 pt, vec3 dir) {
   int result;
-  std::map<EntityHandle, int>::iterator it;
 
   // Check each volume in the list. This is why it can take so long.
-  for (it = vol_handles_ids.begin(); it != vol_handles_ids.end(); it++) {
+  for (int i = 0; i < vol_handles.size(); i++) {
     void* ptr;
-    dag_pt_in_vol(it->first, pt, &result, dir, ptr);
+    dag_pt_in_vol(vol_handles[i], pt, &result, dir, ptr);
     if (result)
-      return it->first;
+      return vol_handles[i];
   }
   throw std::runtime_error("It appears that this point is not in any volume.");
 }
@@ -251,4 +253,90 @@ std::vector<int> get_idx(int sizes[], int d1, int d2, int d3) {
   return idx;
 }
 
-} //namespace pyne
+// Dagmc bridge functions
+
+#define CHECKERR(err) \
+    if((err) != moab::MB_SUCCESS) return err;
+
+
+ErrorCode dag_pt_in_vol(EntityHandle vol, vec3 pt, int* result, vec3 dir,
+                        const void* history) {
+
+  ErrorCode err;
+
+  DagMC* dag = DagMC::instance();
+
+  err = dag->point_in_volume(vol, pt, *result, dir,
+                             static_cast<const DagMC::RayHistory*>(history));
+
+  return err;
+}
+
+ErrorCode dag_ray_follow(EntityHandle firstvol, vec3 ray_start, vec3 ray_dir,
+                         double distance_limit, int* num_intersections,
+                         EntityHandle** surfs, double** distances,
+                         EntityHandle** volumes, ray_buffers* buf){
+
+  ErrorCode err;
+  DagMC* dag = DagMC::instance();
+
+  EntityHandle vol = firstvol;
+  double dlimit = distance_limit;
+  CartVect ray_point(ray_start);
+  EntityHandle next_surf;
+  double next_surf_dist;
+
+  CartVect uvw(ray_dir);
+
+  // iterate over the ray until no more intersections are available
+  while(vol) {
+    err = dag->ray_fire(vol, ray_point.array(), ray_dir, next_surf,
+                        next_surf_dist, &(buf->history), dlimit);
+    CHECKERR(err);
+
+    if(next_surf) {
+      ray_point += uvw * next_surf_dist;
+      buf->surfs.push_back(next_surf);
+      buf->dists.push_back(next_surf_dist);
+      err = dag->next_vol(next_surf, vol, vol);
+      CHECKERR(err);
+      buf->vols.push_back(vol);
+      if(dlimit != 0){
+        dlimit -= next_surf_dist;
+      }
+    }
+    else vol = 0;
+  }
+
+  // assign to the output variables
+  *num_intersections = buf->surfs.size();
+  *surfs = &(buf->surfs[0]);
+  *distances = &(buf->dists[0]);
+  *volumes = &(buf->vols[0]);
+
+  return err;
+}
+
+ErrorCode load_geometry(const char* filename,
+                        std::vector<EntityHandle>* vol_handles){
+  std::vector<int> volList;
+  DagMC* dag = DagMC::instance();
+  // MBI = new Core();
+  ErrorCode err = dag->load_file(filename);
+  CHECKERR(err);
+  // GTT = new GeomTopoTool(MBI);
+  // GQT = new GeomQueryTool(GTT);
+  err = dag->init_OBBTree();
+  CHECKERR(err);
+
+  int num_vols = dag->num_entities(3);
+  volList.reserve(num_vols);
+  for (int i = 1; i <= num_vols; ++i) {
+    volList.push_back(dag->id_by_index(3, i));
+  }
+
+  vol_handles->resize(volList.size());
+  for (int i = 0; i < volList.size(); i++) {
+    vol_handles->at(i) = (dag->entity_by_id(3, volList[i]));
+  }
+}
