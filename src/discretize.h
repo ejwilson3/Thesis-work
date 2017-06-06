@@ -5,25 +5,21 @@
 #include <map>
 #include <DagMC.hpp>
 #include <moab/Interface.hpp>
-// #include <moab/GeomQueryTool.hpp>
+#include <moab/GeomQueryTool.hpp>
 #include <moab/GeomTopoTool.hpp>
 #include <moab/Types.hpp>
 
 using moab::ErrorCode;
 using moab::EntityHandle;
-using moab::DagMC;
+using moab::GeomQueryTool;
 
-// Global variables
-// moab::Interface* MBI;
-// moab::GeomTopoTool* GTT;
-// moab::GeomQueryTool* GQt;
 // The maxiumum volume fraction to be considered valid
 
 // From dagmc_bridge.h in Pyne
 class ray_buffers {
 
 public:
-  DagMC::RayHistory history;
+  GeomQueryTool::RayHistory history;
   std::vector<EntityHandle> surfs;
   std::vector<double> dists;
   std::vector<EntityHandle> vols;

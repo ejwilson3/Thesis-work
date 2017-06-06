@@ -4,10 +4,16 @@
 #include <math.h>
 #include <iostream>
 #include <moab/CartVect.hpp>
+#include <moab/Range.hpp>
 
 using moab::CartVect;
+using moab::Core;
+using moab::GeomTopoTool;
 
 float VOL_FRAC_TOLERANCE = 1e-10;
+moab::Interface* MBI;
+GeomTopoTool* GTT;
+GeomQueryTool* GQT;
 
 std::vector<std::vector<double> > discretize_geom(
     std::vector<std::vector<double> > mesh,
@@ -23,7 +29,7 @@ std::vector<std::vector<double> > discretize_geom(
   struct mesh_row row;
   row.num_rays = num_rays;
   row.grid = grid;
-  if (grid && (pow(sqrt(num_rays), 2) != num_rays))
+  if (grid && (pow((int)sqrt(num_rays), 2) != num_rays))
     throw std::runtime_error("For rays fired in a grid, num_rays must be "
                              "a perfect square.");
 
@@ -109,7 +115,7 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
   }
   row_totals.resize(width.size());
 
-  // These variables are needed for dag_pt_in_vol and dag_ray_follow.
+  // These variables are needed for point_in_volume and dag_ray_follow.
   vec3 pt;
   pt[row.d3] = row.d3divs[0];
   int result = 0;
@@ -128,7 +134,7 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
     // If the next point starts in the same volume as the last one, calling this
     // here can save calling find_volume, which gets expensive.
     if (i != 0)
-      dag_pt_in_vol(eh, pt, &result, dir, NULL);
+      GQT->point_in_volume(eh, pt, result, dir);
     if (!result)
       eh = find_volume(vol_handles, pt, dir);
 
@@ -224,7 +230,8 @@ EntityHandle find_volume(std::vector<EntityHandle> vol_handles,
   // Check each volume in the list. This is why it can take so long.
   for (int i = 0; i < vol_handles.size(); i++) {
     void* ptr;
-    dag_pt_in_vol(vol_handles[i], pt, &result, dir, ptr);
+    GQT->point_in_volume(vol_handles[i], pt, result, dir,
+        static_cast<const GeomQueryTool::RayHistory*>(ptr));
     if (result)
       return vol_handles[i];
   }
@@ -258,27 +265,12 @@ std::vector<int> get_idx(int sizes[], int d1, int d2, int d3) {
 #define CHECKERR(err) \
     if((err) != moab::MB_SUCCESS) return err;
 
-
-ErrorCode dag_pt_in_vol(EntityHandle vol, vec3 pt, int* result, vec3 dir,
-                        const void* history) {
-
-  ErrorCode err;
-
-  DagMC* dag = DagMC::instance();
-
-  err = dag->point_in_volume(vol, pt, *result, dir,
-                             static_cast<const DagMC::RayHistory*>(history));
-
-  return err;
-}
-
 ErrorCode dag_ray_follow(EntityHandle firstvol, vec3 ray_start, vec3 ray_dir,
                          double distance_limit, int* num_intersections,
                          EntityHandle** surfs, double** distances,
                          EntityHandle** volumes, ray_buffers* buf){
 
   ErrorCode err;
-  DagMC* dag = DagMC::instance();
 
   EntityHandle vol = firstvol;
   double dlimit = distance_limit;
@@ -290,7 +282,7 @@ ErrorCode dag_ray_follow(EntityHandle firstvol, vec3 ray_start, vec3 ray_dir,
 
   // iterate over the ray until no more intersections are available
   while(vol) {
-    err = dag->ray_fire(vol, ray_point.array(), ray_dir, next_surf,
+    err = GQT->ray_fire(vol, ray_point.array(), ray_dir, next_surf,
                         next_surf_dist, &(buf->history), dlimit);
     CHECKERR(err);
 
@@ -298,7 +290,7 @@ ErrorCode dag_ray_follow(EntityHandle firstvol, vec3 ray_start, vec3 ray_dir,
       ray_point += uvw * next_surf_dist;
       buf->surfs.push_back(next_surf);
       buf->dists.push_back(next_surf_dist);
-      err = dag->next_vol(next_surf, vol, vol);
+      err = GQT->gttool()->next_vol(next_surf, vol, vol);
       CHECKERR(err);
       buf->vols.push_back(vol);
       if(dlimit != 0){
@@ -320,23 +312,23 @@ ErrorCode dag_ray_follow(EntityHandle firstvol, vec3 ray_start, vec3 ray_dir,
 ErrorCode load_geometry(const char* filename,
                         std::vector<EntityHandle>* vol_handles){
   std::vector<int> volList;
-  DagMC* dag = DagMC::instance();
-  // MBI = new Core();
-  ErrorCode err = dag->load_file(filename);
+
+  // Initialize the tools taken from MOAB
+  MBI = new Core();
+  ErrorCode err = MBI->load_file(filename);
   CHECKERR(err);
-  // GTT = new GeomTopoTool(MBI);
-  // GQT = new GeomQueryTool(GTT);
-  err = dag->init_OBBTree();
+  GTT = new GeomTopoTool(MBI);
+  GQT = new GeomQueryTool(GTT);
+  err = GQT->initialize();
   CHECKERR(err);
 
-  int num_vols = dag->num_entities(3);
-  volList.reserve(num_vols);
-  for (int i = 1; i <= num_vols; ++i) {
-    volList.push_back(dag->id_by_index(3, i));
-  }
+  int num_vols = GQT->gttool()->num_ents_of_dim(3);
 
-  vol_handles->resize(volList.size());
-  for (int i = 0; i < volList.size(); i++) {
-    vol_handles->at(i) = (dag->entity_by_id(3, volList[i]));
+  moab::Range vols;  
+  err = GQT->gttool()->get_gsets_by_dimension(3, vols);
+  vol_handles->resize(num_vols);
+  int i = 0;
+  for (moab::Range::iterator it = vols.begin(); it != vols.end(); ++it) {
+    vol_handles->at(i++) = *it;
   }
 }
