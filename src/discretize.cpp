@@ -24,9 +24,6 @@ std::vector<std::vector<double> > discretize_geom(
     int num_rays,
     bool grid) {
 
-  int rank;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
   // vol_handles holds a list of all of the EntityHandles in the given file.
   std::vector<EntityHandle> vol_handles;
   load_geometry(filename, &vol_handles);
@@ -42,7 +39,9 @@ std::vector<std::vector<double> > discretize_geom(
   // This is just for adding new elements to row_totals to use +=.
   std::vector<double> zeros(2,0.0);
   // This is needed for the function get_idx, in order to determine the
-  // identities of the elements in the current row.
+  // identities of the elements in the current row. It is also used often to
+  // help with separating the work between cores, as it contains the number of
+  // volume elements in each direction.
   int sizes[] = {mesh[0].size() - 1, mesh[1].size() - 1,
                   mesh[2].size() - 1};
 
@@ -51,34 +50,80 @@ std::vector<std::vector<double> > discretize_geom(
   // This stores the intermediate totals.
   std::vector<std::map<int, std::vector<double> > > row_totals;
   // Define the size now to use [] assignment.
-  row_totals.resize((mesh[0].size()-1)*(mesh[1].size()-1)*(mesh[2].size()-1));
+  row_totals.resize(sizes[0]*sizes[1]*sizes[2]);
+  int total_iter = sizes[0]*sizes[1] + sizes[0]*sizes[2] + sizes[1]*sizes[2];
+  int rank, num_proc, remainder, loc_iter, init, fin;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
+
+  // These define the number of iterations done by each processor. The cores of
+  // rank less than remainder will iterate one time more than those of
+  // rank equal or greater to it.
+  remainder = total_iter%(num_proc);
+  loc_iter = total_iter/(num_proc) + (rank < remainder);
+  if (rank < remainder) {
+    init = rank*loc_iter;
+    fin = init + loc_iter;
+  } else {
+    init = rank*loc_iter + remainder;
+    fin = init + loc_iter;
+  }
+
+  // The work is divided into three directions. These determine the first and
+  // last directions down which rays will be fired by each processor, the z
+  // directions, if you will.
+  int d1_i = (init > (sizes[0]*sizes[1])) +
+             (init > (sizes[0]*sizes[1] + sizes[1]*sizes[2]));
+  int d1_f = (fin > (sizes[0]*sizes[1])) +
+             (fin > (sizes[0]*sizes[1] + sizes[1]*sizes[2]));
+  // These will determine where to start and end on the other two directions,
+  // the "x's" and "y's".
+  int init2, fin2, init3, fin3;
 
   // These for loops visit each individual row.
-  for (int d1 = 0; d1 < 3; d1++) {
+  for (int d1 = d1_i; d1 < (d1_f + 1); d1++) {
     // Set up the different direction indices.
     int d2 = (d1 + 1)%3;
     row.d3 = 3 - d1 - d2;
     row.d3divs = mesh[row.d3];
+    // These keep track of where we start and end based off of this current
+    // direction rather than overall.
+    int init_step, fin_step;
+    if (d1 == d1_i) {
+      init_step = init - ((d1>0)*sizes[0]*sizes[1] + (d1==2)*sizes[1]*sizes[2]);
+      init2 = floor(init_step/sizes[d2]);
+    } else {
+      // If you've moved on to an additional d1, the others will need to start
+      // at zero. Likewise for determining init3.
+      init_step = 0;
+      init2 = 0;
+    }
+    if (d1 == d1_f) {
+      fin_step = fin - ((d1>0)*sizes[0]*sizes[1] + (d1==2)*sizes[1]*sizes[2]);
+      fin2 = ceil((float)fin_step/sizes[d2]);
+    } else {
+      // Likewise, if you're not on the last d1, you'll need to end at the last
+      // possible. Likewise for determining fin3.
+      fin_step = sizes[d1]*sizes[d2];
+      fin2 = sizes[d1];
+    }
 
     // Iterate over each starting volume element in the d1/d2 directions.
-    for (int i = 0; i < mesh[d1].size() - 1; i++) {
+    for (int i = init2; i < fin2; i++) {
       row.d1div1 = mesh[d1][i];
       row.d1div2 = mesh[d1][i+1];
+      if (i == init2) {
+        init3 = init_step - i*sizes[d2];
+      } else {
+        init3 = 0;
+      }
+      if (i == (fin2 - 1)) {
+        fin3 = fin_step - i*sizes[d2];
+      } else {
+        fin3 = sizes[d2];
+      }
 
-/*
- * MPI Plans:
- *    Maybe separate into different cores here -
- * int j = (mesh[d2].size()-1)/MPI_Comm_size*MPI_Comm_rank;
- * j < (mesh[d2].size()-q)/MPI_Comm_size*(MPI_Comm_rank+1);
- * j++;
- * (Force (mesh[d2].size()-1)/MPI_Comm_size to an int)
- *
- *    Could do both with some index from 0 to num_rays*mesh[d2].size() (heck,
- * if that's the plan, may as well go from 0 to
- * num_rays*(mesh[0].size()+mesh[1].size()+mesh[2].size()) and split up the
- * whole thing. Will that actually speed it up, though?
-*/
-      for (int j = 0; j < mesh[d2].size() - 1; j++) {
+      for (int j = init3; j < fin3; j++) {
         row.d2div1 = mesh[d2][j];
         row.d2div2 = mesh[d2][j+1];
         std::vector<int> idx = get_idx(sizes, i, j, row.d3);
@@ -88,35 +133,114 @@ std::vector<std::vector<double> > discretize_geom(
             fireRays(row, vol_handles);
 
         // Combine the totals collected from each direction by volume element.
-        if (rank == 0) {
-          for (int k = 0; k < ray_totals.size(); k++) {
-            for (std::map<int, std::vector<double> >::iterator ray_it =
-                ray_totals[k].begin(); ray_it != ray_totals[k].end();
-                ++ray_it) {
-              if (ray_it->second[0] < VOL_FRAC_TOLERANCE)
-                continue;
-              std::map<int, std::vector<double> >::iterator row_it =
-                  row_totals[idx[k]].find(ray_it->first);
-              if (row_it == row_totals[idx[k]].end()){
-                row_totals[idx[k]].insert(row_it,
-                                          std::make_pair(ray_it->first, zeros));
-              }
-              row_totals[idx[k]][ray_it->first][0] += ray_it->second[0];
-              row_totals[idx[k]][ray_it->first][1] += ray_it->second[1];
+        for (int k = 0; k < ray_totals.size(); k++) {
+          for (std::map<int, std::vector<double> >::iterator ray_it =
+              ray_totals[k].begin(); ray_it != ray_totals[k].end();
+              ++ray_it) {
+            if (ray_it->second[0] < VOL_FRAC_TOLERANCE)
+              continue;
+            std::map<int, std::vector<double> >::iterator row_it =
+                row_totals[idx[k]].find(ray_it->first);
+            if (row_it == row_totals[idx[k]].end()){
+              row_totals[idx[k]].insert(row_it,
+                                        std::make_pair(ray_it->first, zeros));
             }
+            row_totals[idx[k]][ray_it->first][0] += ray_it->second[0];
+            row_totals[idx[k]][ray_it->first][1] += ray_it->second[1];
           }
         }
       }
     }
   }
 
+  // The number of unique values on this processor, for passing information.
+  int elem_count = 0;
+  for (int i = 0; i < row_totals.size(); i++) {
+    elem_count += row_totals[i].size();
+  }
+  // Begin combining results here. max_count is needed in case some processes
+  // end up with a greater number of results than others.
+  int max_count;
+  MPI_Allreduce(&elem_count, &max_count, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  int total_count;
+  // total_count will be used to allocate space, but it's only needed on rank 0.
+  if (rank != 0) {
+    total_count = 1;
+  } else {
+    total_count = max_count*num_proc;
+  }
+  // These will hold the combined results after the MPI_Gather function calls.
+  int all_partitions[total_count];
+  EntityHandle all_ehs[total_count];
+  double all_sums[total_count], all_sqr_sums[total_count];
+  // These will hold the results of each ray, to be combined.
+  int mesh_partition[max_count];
+  EntityHandle ehs[max_count];
+  double sums[max_count], sqr_sums[max_count];
+  // If there are fewer results than max_count, fill the rest of mesh_partiton
+  // with -1 to avoid trying to use garbage as data.
+  for (int i = elem_count; i < max_count; i++) {
+    mesh_partition[i] = -1;
+  }
+
+  // Easy way to keep track of the current element in an array while using
+  // a combination of ints and iterators.
+  int cur_count = 0;
+  // Fill the arrays with the results for use with MPI_Gather.
+  for (int i = 0; i < row_totals.size(); i++) {
+    for (std::map<int, std::vector<double> >::iterator it =
+        row_totals[i].begin(); it != row_totals[i].end(); ++it) {
+      mesh_partition[cur_count] = i;
+      ehs[cur_count] = it->first;
+      sums[cur_count] = it->second[0];
+      sqr_sums[cur_count] = it->second[1];
+      cur_count++;
+    }
+  }
+  MPI_Gather(&mesh_partition, max_count, MPI_INT, &all_partitions,
+             max_count, MPI_INT, 0, MPI_COMM_WORLD);
+  MPI_Gather(&ehs, max_count, MPI_LONG, &all_ehs,
+             max_count, MPI_LONG, 0, MPI_COMM_WORLD);
+  MPI_Gather(&sums, max_count, MPI_DOUBLE, &all_sums,
+             max_count, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Gather(&sqr_sums, max_count, MPI_DOUBLE, &all_sqr_sums,
+             max_count, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+  // The largest partition number, for correctly sizing the combined totals.
+  int max_partition;
+  MPI_Reduce(&mesh_partition[elem_count - 1], &max_partition, 1,
+             MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+  // Now put all of the results back and combine them more cleanly.
+  if (rank == 0){
+    std::vector<std::map<int, std::vector<double> > > totals;
+    totals.resize(max_partition + 1);
+    for (int i = 0; i < total_count; i++) {
+      // If it's -1, it came from one of the processors with less than max_count
+      // elements in its array, and needs to be skipped.
+      if (all_partitions[i] < 0) {
+        continue;
+      }
+      // If the current cell isn't in the totals yet, add it.
+      std::map<int, std::vector<double> >::iterator it =
+          totals[all_partitions[i]].find(all_ehs[i]);
+      if (it == totals[all_partitions[i]].end()){
+        std::vector<double> both_sums;
+        both_sums.push_back(all_sums[i]);
+        both_sums.push_back(all_sqr_sums[i]);
+        totals[all_partitions[i]].insert(it, std::make_pair(all_ehs[i],
+                                         both_sums));
+      } else {
+        totals[all_partitions[i]][all_ehs[i]][0] += all_sums[i];
+        totals[all_partitions[i]][all_ehs[i]][1] += all_sqr_sums[i];
+      }
+    }
+
   // Evaluate the results and prepare them for return.
-  if (rank == 0) {
     int total_rays = num_rays*3;
     std::vector<double> ray_results(4,0.0);
-    for (int i = 0; i < row_totals.size(); i++) {
+    for (int i = 0; i < totals.size(); i++) {
       for (std::map<int, std::vector<double> >::iterator it =
-          row_totals[i].begin(); it != row_totals[i].end(); ++it) {
+          totals[i].begin(); it != totals[i].end(); ++it) {
         ray_results[0] = i;
         ray_results[1] = it->first;
         ray_results[2] = it->second[0]/total_rays;
@@ -140,8 +264,6 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
   }
   row_totals.resize(width.size());
 
-  // This counter is used to determine the total number of items to be returned.
-  int elem_count = 0;
   // These variables are needed for point_in_volume and dag_ray_follow.
   vec3 pt;
   pt[row.d3] = row.d3divs[0];
@@ -153,33 +275,14 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
   EntityHandle *surfs, *volumes;
   double *distances;
 
-  // These are used to divide the work between processors.
-  int rank, num_proc, remainder, num_fires, first_ray, last_ray;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
-
-  // These define the number of rays fired by each processor.
-  // The cores of rank less than remainder will fire one more ray than those of
-  // rank equal or greater to it.
-  remainder = row.num_rays%(num_proc);
-  num_fires = row.num_rays/(num_proc) + (rank < remainder);
-  if (rank < remainder) {
-    first_ray = rank*num_fires;
-    last_ray = first_ray + num_fires;
-  } else {
-    first_ray = rank*num_fires + remainder;
-    last_ray = first_ray + num_fires;
-  }
-
-  // Now start iterating through each ray.
-  for (int i = first_ray; i < last_ray; i++) {
+  for (int i = 0; i < row.num_rays; i++) {
 
     startPoints(row, i);
     pt[(row.d3+1)%3] = row.start_point_d1;
     pt[(row.d3+2)%3] = row.start_point_d2;
     // If the next point starts in the same volume as the last one, calling
     // this here can save calling find_volume, which gets expensive.
-    if (i != first_ray)
+    if (i != 0)
       GQT->point_in_volume(eh, pt, result, dir);
     if (!result){
       eh = find_volume(vol_handles, pt, dir);
@@ -188,7 +291,7 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
     // This stores information from dag_ray_follow.
     ray_buffers* buf = new ray_buffers;
     dag_ray_follow(eh, pt, dir, 0.0, &num_intersections,
-                  &surfs, &distances, &volumes, buf);
+                   &surfs, &distances, &volumes, buf);
 
     std::vector<double> zeros(2,0.0);
     // This will hold the numbers to add to the totals.
@@ -210,7 +313,6 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
             row_totals[count].find(eh);
         if (it == row_totals[count].end()){
           row_totals[count].insert(it, std::make_pair(eh, zeros));
-          elem_count++;
         }
 
         value = curr_width/width[count];
@@ -241,9 +343,8 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
             row_totals[count].find(eh);
         if (it == row_totals[count].end()){
           row_totals[count].insert(it, std::make_pair(eh, zeros));
-          elem_count++;
         }
-        
+
         value = distances[intersection]/width[count];
         row_totals[count][eh][0] += value;
         row_totals[count][eh][1] += value*value;
@@ -254,78 +355,7 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
     }
     delete buf;
   }
-
-  // Begin combining results here. max_count is needed in case some processes
-  // end up with a greater number of results than others.
-  int max_count;
-  MPI_Allreduce(&elem_count, &max_count, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-  int total_count;
-  // total_count will be used to allocate space, but it's only needed on rank 0.
-  if (rank != 0) {
-    total_count = 1;
-  } else {
-    total_count = max_count*num_proc;
-  }
-  // These will hold the combined results after the MPI_Gather function calls.
-  int all_partitions[total_count];
-  EntityHandle all_ehs[total_count];
-  double all_sums[total_count], all_sqr_sums[total_count];
-  // These will hold the results of each ray, to be combined.
-  int mesh_partition[max_count];
-  // If there are fewer results than max_count, fill the rest with -1 to avoid
-  // trying to use garbage as data.
-  for (int i = elem_count; i < max_count; i++) {
-    mesh_partition[i] = -1;
-  }
-  EntityHandle ehs[max_count];
-  double sums[max_count];
-  double sqr_sums[max_count];
-
-  int cur_count = 0;
-  // Fill the arrays with the results for use with MPI_Gather.
-  for (int i = 0; i < row_totals.size(); i++) {
-    for (std::map<int, std::vector<double> >::iterator it =
-        row_totals[i].begin(); it != row_totals[i].end(); ++it) {
-      mesh_partition[cur_count] = i;
-      ehs[cur_count] = it->first;
-      sums[cur_count] = it->second[0];
-      sqr_sums[cur_count] = it->second[1];
-      cur_count++;
-    }
-  }
-  MPI_Gather(&mesh_partition, max_count, MPI_INT, &all_partitions,
-              max_count, MPI_INT, 0, MPI_COMM_WORLD);
-  MPI_Gather(&ehs, max_count, MPI_LONG, &all_ehs,
-              max_count, MPI_LONG, 0, MPI_COMM_WORLD);
-  MPI_Gather(&sums, max_count, MPI_DOUBLE, &all_sums,
-              max_count, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-  MPI_Gather(&sqr_sums, max_count, MPI_DOUBLE, &all_sqr_sums,
-              max_count, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
-  // Now put all of the results back and combine them more cleanly.
-  if (rank == 0){
-    std::vector<std::map<int, std::vector<double> > > totals;
-    totals.resize(mesh_partition[elem_count - 1] + 1);
-    for (int i = 0; i < total_count; i++) {
-      if (all_partitions[i] < 0) {
-        continue;
-      }
-      // If the current cell isn't in the totals yet, add it.
-      std::map<int, std::vector<double> >::iterator it =
-          totals[all_partitions[i]].find(all_ehs[i]);
-      if (it == totals[all_partitions[i]].end()){
-        std::vector<double> both_sums;
-        both_sums.push_back(all_sums[i]);
-        both_sums.push_back(all_sqr_sums[i]);
-        totals[all_partitions[i]].insert(it, std::make_pair(all_ehs[i],
-                                         both_sums));
-      } else {
-        totals[all_partitions[i]][all_ehs[i]][0] += all_sums[i];
-        totals[all_partitions[i]][all_ehs[i]][1] += all_sqr_sums[i];
-      }
-    }
-    return totals;
-  }
+  return row_totals;
 }
 
 void startPoints(mesh_row &row, int iter) {
