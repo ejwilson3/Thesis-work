@@ -275,6 +275,24 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
   EntityHandle *surfs, *volumes;
   double *distances;
 
+//START
+  // These are used to divide the work between processors.
+  int rank, num_proc, remainder, num_fires, first_ray, last_ray;
+  int elem_count = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &num_proc);
+
+  remainder = row.num_rays%(num_proc);
+  num_fires = row.num_rays/(num_proc) + (rank < remainder);
+  if (rank < remainder) {
+    first_ray = rank*num_fires;
+    last_ray = first_ray + num_fires;
+  } else {
+    first_ray = rank*num_fires + remainder;
+    last_ray = first_ray + num_fires;
+  }
+//END
+
   for (int i = 0; i < row.num_rays; i++) {
 
     startPoints(row, i);
@@ -283,6 +301,7 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
     // If the next point starts in the same volume as the last one, calling
     // this here can save calling find_volume, which gets expensive.
     if (i != 0)
+    // if (i != first_ray)
       GQT->point_in_volume(eh, pt, result, dir);
     if (!result){
       eh = find_volume(vol_handles, pt, dir);
@@ -313,6 +332,8 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
             row_totals[count].find(eh);
         if (it == row_totals[count].end()){
           row_totals[count].insert(it, std::make_pair(eh, zeros));
+          // HERE
+          elem_count++;
         }
 
         value = curr_width/width[count];
@@ -343,6 +364,8 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
             row_totals[count].find(eh);
         if (it == row_totals[count].end()){
           row_totals[count].insert(it, std::make_pair(eh, zeros));
+          // HERE
+          elem_count++;
         }
 
         value = distances[intersection]/width[count];
@@ -350,12 +373,80 @@ std::vector<std::map<int, std::vector<double> > > fireRays(
         row_totals[count][eh][1] += value*value;
         curr_width -= distances[intersection];
       }
-      eh = volumes[intersection];
-      intersection++;
+      if (intersection < num_intersections) {
+        eh = volumes[intersection];
+        intersection++;
+      } else {
+        complete = true;
+        break;
+      }
     }
     delete buf;
   }
+
+  // START
+  int max_count;
+  MPI_Allreduce(&elem_count, &max_count, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  int total_count;
+  if (rank != 0) {
+    total_count = 1;
+  } else {
+    total_count = max_count*num_proc;
+  }
+  int all_partitions[total_count];
+  EntityHandle all_ehs[total_count];
+  double all_sums[total_count], all_sqr_sums[total_count];
+  int mesh_partition[max_count];
+  for (int i = elem_count; i < max_count; i++) {
+    mesh_partition[i] = -1;
+  }
+  EntityHandle ehs[max_count];
+  double sums[max_count];
+  double sqr_sums[max_count];
+
+  int cur_count = 0;
+  for (int i = 0; i < row_totals.size(); i++) {
+    for (std::map<int, std::vector<double> >::iterator it =
+        row_totals[i].begin(); it != row_totals[i].end(); ++it) {
+      mesh_partition[cur_count] = i;
+      ehs[cur_count] = it->first;
+      sums[cur_count] = it->second[0];
+      sqr_sums[cur_count] = it->second[1];
+      cur_count++;
+    }
+  }
+  MPI_Gather(&mesh_partition, max_count, MPI_INT, &all_partitions,
+             max_count, MPI_INT, 0, MPI_COMM_WORLD);
+  MPI_Gather(&ehs, max_count, MPI_LONG, &all_ehs,
+             max_count, MPI_LONG, 0, MPI_COMM_WORLD);
+  MPI_Gather(&sums, max_count, MPI_DOUBLE, &all_sums,
+             max_count, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Gather(&sqr_sums, max_count, MPI_DOUBLE, &all_sqr_sums,
+             max_count, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+  if (rank == 0){
+    std::vector<std::map<int, std::vector<double> > > totals;
+    totals.resize(mesh_partition[elem_count - 1] + 1);
+    for (int i = 0; i < total_count; i++) {
+      if (all_partitions[i] < 0) {
+        continue;
+      }
+      std::map<int, std::vector<double> >::iterator it =
+          totals[all_partitions[i]].find(all_ehs[i]);
+      if (it == totals[all_partitions[i]].end()){
+        std::vector<double> both_sums;
+        both_sums.push_back(all_sums[i]);
+        both_sums.push_back(all_sqr_sums[i]);
+        totals[all_partitions[i]].insert(it, std::make_pair(all_ehs[i],
+                                         both_sums));
+      } else {
+        totals[all_partitions[i]][all_ehs[i]][0] += all_sums[i];
+        totals[all_partitions[i]][all_ehs[i]][1] += all_sqr_sums[i];
+
+  // END
   return row_totals;
+  // HERE
+  }
 }
 
 void startPoints(mesh_row &row, int iter) {
@@ -391,26 +482,28 @@ EntityHandle find_volume(std::vector<EntityHandle> vol_handles,
     if (result)
       return vol_handles[i];
   }
+  std::cerr << "(" << pt[0] << ", " << pt[1] <<", "<< pt[2] << ")" << std::endl;
   throw std::runtime_error("It appears that this point is not in any volume.");
 }
 
 std::vector<int> get_idx(int sizes[], int d1, int d2, int d3) {
   std::vector<int> idx;
-  // The ids iterate over x, then y, then z. Which one of those is defined by
-  // which coordinate depends on d3.
+  // The ids iterate over the three directions in such a way that it matches
+  // with that done by PyNE. Which direction is defined by which coordinate
+  // depends on d3.
   if (d3 == 0){
     for (int i = 0; i < sizes[d3]; i++) {
-      idx.push_back(i + sizes[0]*d1 + sizes[0]*sizes[1]*d2);
+      idx.push_back(d2 + sizes[2]*d1 + sizes[1]*sizes[2]*i);
     }
   }
   else if (d3 == 1){
     for (int i = 0; i < sizes[d3]; i++) {
-      idx.push_back(d2 + sizes[0]*i + sizes[0]*sizes[1]*d1);
+      idx.push_back(d1 + sizes[2]*i + sizes[1]*sizes[2]*d2);
     }
   }
   else if (d3 == 2){
     for (int i = 0; i < sizes[d3]; i++) {
-      idx.push_back(d1 + sizes[0]*d2 + sizes[0]*sizes[1]*i);
+      idx.push_back(i + sizes[2]*d2 + sizes[1]*sizes[2]*d1);
     }
   }
   return idx;
