@@ -53,6 +53,8 @@ struct mesh_row {
   // The index for the direction the row is facing (along which the rays will be
   // fired.
   int d3;
+  // The starting and ending points for the sequence of ray fires.
+  int init, fin;
 };
 
 /*

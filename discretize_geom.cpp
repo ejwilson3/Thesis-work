@@ -5,7 +5,7 @@
 
 int main(int argc, char* argv[]){
   clock_t t1, t2;
-  int rank, num_proc;
+  int rank;
   int num_rays = 10;
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -55,6 +55,7 @@ int main(int argc, char* argv[]){
     float diff((float)t2 - (float)t1);
     float seconds = diff/CLOCKS_PER_SEC;
     /*
+    // This is for checking results
     for (int i = 0; i < results.size(); i++) {
       std::cout << "[ ";
       for (int j = 0; j < results[i].size(); j++) {
